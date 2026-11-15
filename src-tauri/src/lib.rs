@@ -1,0 +1,86 @@
+/* Notes inside function bodies use doc-block comments, the house style. */
+#![allow(unused_doc_comments)]
+
+mod download;
+mod files;
+mod scrape;
+mod updater;
+mod ytdlp;
+
+use std::time::Duration;
+use tauri::Manager;
+
+/// How long the splash window may stay up before the main window is shown anyway.
+const SPLASH_TIME_LIMIT: Duration = Duration::from_secs(15);
+
+/// The browser name sent with page and video requests; many sites refuse a request without one.
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+fn restore_main_window(app: &tauri::AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+}
+
+/**
+ * The main window starts hidden behind the splash window, and the page shows
+ * it when it is ready (src/lib/splash.ts). If the page fails before that, this
+ * shows it and closes the splash after a time limit.
+ */
+fn end_splash_after_time_limit(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(SPLASH_TIME_LIMIT);
+        let hidden = app
+            .get_webview_window("main")
+            .is_some_and(|main| !main.is_visible().unwrap_or(true));
+        if hidden {
+            restore_main_window(&app);
+        }
+        if let Some(splash) = app.get_webview_window("splash") {
+            let _ = splash.close();
+        }
+    });
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let window_state_flags = tauri_plugin_window_state::StateFlags::SIZE
+        | tauri_plugin_window_state::StateFlags::POSITION
+        | tauri_plugin_window_state::StateFlags::MAXIMIZED;
+
+    tauri::Builder::default()
+        .manage(ytdlp::Install::default())
+        .manage(download::Downloads::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            restore_main_window(app);
+        }))
+        .plugin(
+            // The splash window is always centered, so its state is not saved.
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(window_state_flags)
+                .with_denylist(&["splash"])
+                .build(),
+        )
+        .setup(|app| {
+            end_splash_after_time_limit(app.handle().clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            scrape::scrape_videos,
+            download::download_video,
+            download::download_folder,
+            download::cancel_download,
+            files::reveal_file,
+            files::open_folder,
+            files::cursor_position,
+            files::log_frontend_error,
+            updater::check_for_update,
+            updater::download_and_run_installer,
+            updater::get_app_version
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Scrape Sage");
+}
